@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - API_KEY=${API_KEY:-dev-key-change-in-production}
+      - DATA_PATH=/app/data/freight_data.csv
+    volumes:
+      # Hot-reload static dashboard without rebuilding the image
+      - ./static:/app/static:ro
