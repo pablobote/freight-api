@@ -23,7 +23,7 @@ DB_NAME       = os.getenv("FIRESTORE_DB", "inbound-calls-database")
 app = FastAPI(title="HappyRobot Freight API", version="3.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ── Firestore (only imported and connected if USE_FIRESTORE=true) ─────────────
+# ── Firestore ─────────────────────────────────────────────────────────────────
 db = None
 if USE_FIRESTORE:
     from google.cloud import firestore
@@ -85,47 +85,24 @@ def now() -> str:
     return datetime.utcnow().isoformat()
 
 def make_carrier_key(caller_name: str, mc: str) -> str:
-    """Unique key is the caller name so the same MC can map to different callers."""
+    """Unique key is caller name. Falls back to mc_ prefix if no name."""
     if caller_name and caller_name.strip():
         return caller_name.strip().lower()
-    return f"mc_{mc.strip().lower()}" if mc and mc.strip() else "unknown_carrier"
+    return f"mc_{mc.strip()}" if mc and mc.strip() else "unknown"
 
-def resolve_carrier_key(caller_name: str = "", mc: str = "", load_id: str = "") -> str:
-    if load_id and mc:
-        for offer in reversed(get_docs("offers")):
-            if offer.get("load_id") == load_id and offer.get("mc_number") == mc:
-                offer_name = offer.get("carrier_name") or offer.get("legal_name") or ""
-                if offer_name.strip():
-                    for carrier in get_docs("carriers"):
-                        if carrier.get("mc_number") == mc:
-                            return carrier.get("carrier_key") or make_carrier_key(carrier.get("carrier_name", ""), mc)
-                    return make_carrier_key(offer_name, mc)
+def find_carrier_by_mc(mc: str) -> Optional[dict]:
+    """
+    Find the most recently active carrier with this MC number.
+    Used to link offer/analysis back to the FMCSA-created record.
+    """
+    candidates = [c for c in get_docs("carriers") if c.get("mc_number") == mc]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c.get("last_seen") or "", reverse=True)
+    return candidates[0]
 
-    carriers_with_same_mc = [carrier for carrier in get_docs("carriers") if carrier.get("mc_number") == mc]
-    if carriers_with_same_mc:
-        if caller_name and caller_name.strip():
-            normalized_name = caller_name.strip().lower()
-            for carrier in carriers_with_same_mc:
-                if (carrier.get("carrier_name") or "").strip().lower() == normalized_name:
-                    return carrier.get("carrier_key") or make_carrier_key(caller_name, mc)
-        # If a caller_name was provided but didn't match any existing carrier
-        # with the same MC, create a new carrier key for that caller_name so
-        # different callers with the same MC are stored separately.
-        if caller_name and caller_name.strip():
-            return make_carrier_key(caller_name, mc)
-
-        # No caller_name provided — fall back to the first existing carrier
-        # that shares the MC (legacy behavior).
-        first = carriers_with_same_mc[0]
-        return first.get("carrier_key") or make_carrier_key(first.get("carrier_name", ""), mc)
-
-    if caller_name and caller_name.strip():
-        return make_carrier_key(caller_name, mc)
-
-    return make_carrier_key("", mc)
-
-def upsert_carrier(caller_name: str, mc: str, patch: dict, load_id: str = "") -> str:
-    key = resolve_carrier_key(caller_name, mc, load_id)
+def upsert_carrier(caller_name: str, mc: str, patch: dict) -> str:
+    key = make_carrier_key(caller_name, mc)
     existing = get_doc("carriers", key)
     if not existing:
         existing = {
@@ -162,10 +139,10 @@ class OfferWebhook(BaseModel):
     weight:         Optional[int]   = None
 
     @validator("weight", pre=True)
-    def normalize_weight(cls, value):
-        if value == "" or value is None:
+    def normalize_weight(cls, v):
+        if v == "" or v is None:
             return None
-        return value
+        return v
 
 class AnalysisWebhook(BaseModel):
     mc_number:                Optional[str] = None
@@ -176,6 +153,7 @@ class AnalysisWebhook(BaseModel):
     outcome_reasoning:        Optional[str] = None
     call_duration_seconds:    Optional[str] = None
     nego_rounds:              Optional[str] = None
+    carrier_attitude:         Optional[str] = None
 
     @property
     def negotiation_rounds(self) -> Optional[int]:
@@ -197,26 +175,26 @@ class NegoEvent(BaseModel):
     reasoning:   Optional[str]   = None
 
 class FMCSAData(BaseModel):
-    mc_number:              Optional[str] = None
-    caller_name:            Optional[str] = None
-    dotNumber:              Optional[str] = None
-    legalName:              Optional[str] = None
-    dbaName:                Optional[str] = None
-    phyCity:                Optional[str] = None
-    phyState:               Optional[str] = None
-    phyStreet:              Optional[str] = None
-    phyZipcode:             Optional[str] = None
-    statusCode:             Optional[str] = None
-    commonAuthorityStatus:  Optional[str] = None
-    totalDrivers:           Optional[str] = None
-    totalPowerUnits:        Optional[str] = None
-    bipdInsuranceOnFile:    Optional[str] = None
-    bipdRequiredAmount:     Optional[str] = None
-    cargoInsuranceOnFile:   Optional[str] = None
-    safetyRating:           Optional[str] = None
-    allowedToOperate:       Optional[str] = None
-    crashTotal:             Optional[str] = None
-    carrierOperationDesc:   Optional[str] = None
+    mc_number:             Optional[str] = None
+    caller_name:           Optional[str] = None
+    dotNumber:             Optional[str] = None
+    legalName:             Optional[str] = None
+    dbaName:               Optional[str] = None
+    phyCity:               Optional[str] = None
+    phyState:              Optional[str] = None
+    phyStreet:             Optional[str] = None
+    phyZipcode:            Optional[str] = None
+    statusCode:            Optional[str] = None
+    commonAuthorityStatus: Optional[str] = None
+    totalDrivers:          Optional[str] = None
+    totalPowerUnits:       Optional[str] = None
+    bipdInsuranceOnFile:   Optional[str] = None
+    bipdRequiredAmount:    Optional[str] = None
+    cargoInsuranceOnFile:  Optional[str] = None
+    safetyRating:          Optional[str] = None
+    allowedToOperate:      Optional[str] = None
+    crashTotal:            Optional[str] = None
+    carrierOperationDesc:  Optional[str] = None
 
 # ── Loads ─────────────────────────────────────────────────────────────────────
 @app.get("/loads", dependencies=[Depends(require_api_key)])
@@ -252,10 +230,17 @@ def webhook_offer(payload: OfferWebhook):
     entry["id"]        = make_id(payload.mc_number or "", now())
     entry["timestamp"] = now()
     store_doc("offers", entry["id"], entry)
-    if payload.carrier_name or payload.mc_number:
-        key = upsert_carrier(payload.carrier_name or "", payload.mc_number or "", {
-            "legal_name": payload.legal_name,
-        }, payload.load_id or "")
+
+    if payload.mc_number:
+        # FMCSA always fires first and creates the carrier record with the caller's name.
+        # Find that existing record by MC number rather than creating a new one.
+        existing = find_carrier_by_mc(payload.mc_number)
+        if existing:
+            key = existing["carrier_key"]
+        else:
+            # No FMCSA record yet — create one using whatever name we have
+            key = upsert_carrier(payload.carrier_name or "", payload.mc_number, {})
+
         carrier = get_doc("carriers", key)
         carrier["call_history"].append({
             "type": "offer", "load_id": payload.load_id,
@@ -270,25 +255,30 @@ def webhook_offer(payload: OfferWebhook):
 @app.post("/webhooks/analysis", dependencies=[Depends(require_api_key)])
 def webhook_analysis(payload: AnalysisWebhook):
     entry = payload.dict()
-    entry["id"]                   = make_id(payload.mc_number or "", now())
-    entry["timestamp"]            = now()
+    entry["id"]                    = make_id(payload.mc_number or "", now())
+    entry["timestamp"]             = now()
     entry["call_duration_seconds"] = payload.duration_seconds
-    entry["negotiation_rounds"]   = payload.negotiation_rounds
+    entry["negotiation_rounds"]    = payload.negotiation_rounds
     store_doc("analyses", entry["id"], entry)
+
     if payload.mc_number:
-        key = upsert_carrier("", payload.mc_number, {}, payload.load_id or "")
-        carrier = get_doc("carriers", key)
-        carrier["call_history"].append({
-            "type": "analysis", "load_id": payload.load_id,
-            "sentiment_classification": payload.sentiment_classification,
-            "sentiment_reasoning":      payload.sentiment_reasoning,
-            "outcome_classification":   payload.outcome_classification,
-            "outcome_reasoning":        payload.outcome_reasoning,
-            "call_duration_seconds":    payload.duration_seconds,
-            "negotiation_rounds":       payload.negotiation_rounds,
-            "timestamp": entry["timestamp"],
-        })
-        store_doc("carriers", key, carrier)
+        existing = find_carrier_by_mc(payload.mc_number)
+        if existing:
+            key = existing["carrier_key"]
+            carrier = get_doc("carriers", key)
+            if carrier:
+                carrier["call_history"].append({
+                    "type": "analysis", "load_id": payload.load_id,
+                    "sentiment_classification": payload.sentiment_classification,
+                    "sentiment_reasoning":      payload.sentiment_reasoning,
+                    "outcome_classification":   payload.outcome_classification,
+                    "outcome_reasoning":        payload.outcome_reasoning,
+                    "call_duration_seconds":    payload.duration_seconds,
+                    "carrier_attitude":         payload.carrier_attitude,
+                    "negotiation_rounds":       payload.negotiation_rounds,
+                    "timestamp":               entry["timestamp"],
+                })
+                store_doc("carriers", key, carrier)
     return {"status": "received", "id": entry["id"]}
 
 @app.post("/webhooks/negotiation", dependencies=[Depends(require_api_key)])
@@ -301,6 +291,8 @@ def webhook_negotiation(payload: NegoEvent):
 
 @app.post("/carriers/{mc_number}/fmcsa", dependencies=[Depends(require_api_key)])
 def push_fmcsa(mc_number: str, data: FMCSAData):
+    # Find the right carrier key using the caller_name in the FMCSA payload
+    key = make_carrier_key(data.caller_name or "", mc_number)
     upsert_carrier(data.caller_name or "", mc_number, {
         "legal_name":              data.legalName,
         "dba_name":                data.dbaName,
@@ -327,24 +319,12 @@ def push_fmcsa(mc_number: str, data: FMCSAData):
 # ── Carriers ──────────────────────────────────────────────────────────────────
 @app.get("/carriers", dependencies=[Depends(require_api_key)])
 def list_carriers():
-    data = []
-    for carrier in get_docs("carriers"):
-        carrier = dict(carrier)
-        carrier["carrier_key"] = carrier.get("carrier_key") or make_carrier_key(carrier.get("carrier_name", ""), carrier.get("mc_number", ""))
-        data.append(carrier)
+    data = get_docs("carriers")
     return {"total": len(data), "carriers": data}
 
 @app.get("/carriers/{carrier_key}", dependencies=[Depends(require_api_key)])
 def get_carrier(carrier_key: str):
     c = get_doc("carriers", carrier_key)
-    if not c:
-        for carrier in get_docs("carriers"):
-            if carrier.get("carrier_key") == carrier_key:
-                c = carrier
-                break
-            if make_carrier_key(carrier.get("carrier_name", ""), carrier.get("mc_number", "")) == carrier_key:
-                c = carrier
-                break
     if not c:
         raise HTTPException(status_code=404, detail="Carrier not found")
     return c
@@ -364,72 +344,43 @@ def list_negotiations():
 # ── Metrics ───────────────────────────────────────────────────────────────────
 @app.get("/metrics", dependencies=[Depends(require_api_key)])
 def get_metrics():
-    data      = load_data()
     offers    = get_docs("offers")
     analyses  = get_docs("analyses")
     carriers  = get_docs("carriers")
 
-    # Build a per-call analysis view to avoid double-counting when the same
-    # call is posted multiple times. Latest timestamp wins per (mc, load_id).
-    analyses_by_call = {}
-    for a in analyses:
-        mc = (a.get("mc_number") or "").strip().lower()
-        load_id = (a.get("load_id") or "").strip().lower()
-        fallback = (a.get("id") or "").strip().lower() or make_id(now())
-        call_key = f"{mc}::{load_id}" if (mc or load_id) else fallback
+    booked       = [o for o in offers if o.get("final_rate")]
+    with_both    = [o for o in offers if o.get("final_rate") and o.get("rate_offered")]
+    savings_list = [o["rate_offered"] - o["final_rate"] for o in with_both]
+    final_rates  = [o["final_rate"] for o in booked]
+    asked_rates  = [o["rate_offered"] for o in offers if o.get("rate_offered")]
 
-        prev = analyses_by_call.get(call_key)
-        if not prev:
-            analyses_by_call[call_key] = a
-            continue
+    avg_savings    = round(sum(savings_list)/len(savings_list), 2) if savings_list else 0
+    avg_final_rate = round(sum(final_rates)/len(final_rates), 2)   if final_rates  else 0
+    avg_asked_rate = round(sum(asked_rates)/len(asked_rates), 2)   if asked_rates  else 0
+    total_saved    = round(sum(savings_list), 2)                   if savings_list else 0
+    pct_saved      = round(avg_savings/avg_asked_rate*100, 1)      if avg_asked_rate else 0
 
-        prev_ts = prev.get("timestamp") or ""
-        curr_ts = a.get("timestamp") or ""
-        if curr_ts >= prev_ts:
-            analyses_by_call[call_key] = a
+    outcomes   = Counter(a.get("outcome_classification")   for a in analyses if a.get("outcome_classification"))
+    sentiments = Counter(a.get("sentiment_classification") for a in analyses if a.get("sentiment_classification"))
+    attitudes  = Counter(a.get("carrier_attitude")         for a in analyses if a.get("carrier_attitude"))
+    durations  = [a["call_duration_seconds"] for a in analyses if a.get("call_duration_seconds")]
+    rounds_l   = [a["negotiation_rounds"]    for a in analyses if a.get("negotiation_rounds")]
 
-    effective_analyses = list(analyses_by_call.values())
+    avg_duration = round(sum(durations)/len(durations)) if durations else 0
+    avg_rounds   = round(sum(rounds_l)/len(rounds_l), 1) if rounds_l else 0
 
-    # ── Offer metrics ─────────────────────────────────────────────────────────
-    booked        = [o for o in offers if o.get("final_rate")]
-    with_both     = [o for o in offers if o.get("final_rate") and o.get("rate_offered")]
-    savings_list  = [o["rate_offered"] - o["final_rate"] for o in with_both]
-    final_rates   = [o["final_rate"] for o in booked]
-    asked_rates   = [o["rate_offered"] for o in offers if o.get("rate_offered")]
+    booked_count = sum(v for k, v in outcomes.items() if "book" in str(k).lower()) if outcomes else len(booked)
+    total_calls  = sum(outcomes.values()) if outcomes else len(offers)
+    booking_rate = round(booked_count/total_calls*100, 1) if total_calls else 0
 
-    avg_savings      = round(sum(savings_list) / len(savings_list), 2)       if savings_list  else 0
-    avg_final_rate   = round(sum(final_rates)  / len(final_rates),  2)       if final_rates   else 0
-    avg_asked_rate   = round(sum(asked_rates)  / len(asked_rates),  2)       if asked_rates   else 0
-    total_saved      = round(sum(savings_list), 2)                           if savings_list  else 0
-    pct_saved        = round(avg_savings / avg_asked_rate * 100, 1)          if avg_asked_rate else 0
-
-    # ── Analysis metrics ──────────────────────────────────────────────────────
-    outcomes         = Counter(a.get("outcome_classification")   for a in effective_analyses if a.get("outcome_classification"))
-    sentiments       = Counter(a.get("sentiment_classification") for a in effective_analyses if a.get("sentiment_classification"))
-
-    durations        = [a["call_duration_seconds"] for a in effective_analyses if a.get("call_duration_seconds")]
-    avg_duration     = round(sum(durations) / len(durations))                if durations     else 0
-
-    rounds_list      = [a["negotiation_rounds"] for a in effective_analyses if a.get("negotiation_rounds")]
-    avg_rounds       = round(sum(rounds_list) / len(rounds_list), 1)         if rounds_list   else 0
-
-    # Keep booking KPIs consistent with outcome bars when outcome data exists.
-    calls_with_outcome = sum(outcomes.values())
-    booked_from_outcome = sum(v for k, v in outcomes.items() if "book" in str(k).strip().lower())
-
-    total_calls_kpi = calls_with_outcome if calls_with_outcome else len(offers)
-    total_booked_kpi = booked_from_outcome if calls_with_outcome else len(booked)
-    booking_rate = round(total_booked_kpi / total_calls_kpi * 100, 1) if total_calls_kpi else 0
-
-    # ── Equipment + route breakdown (from offers, real call data) ─────────────
-    equip_calls      = Counter(o.get("equipment_type") for o in offers if o.get("equipment_type"))
-    origin_calls     = Counter(o.get("origin")         for o in offers if o.get("origin"))
-    dest_calls       = Counter(o.get("destination")    for o in offers if o.get("destination"))
+    equip_calls = Counter(o.get("equipment_type") for o in offers if o.get("equipment_type"))
+    origin_calls= Counter(o.get("origin")         for o in offers if o.get("origin"))
+    dest_calls  = Counter(o.get("destination")    for o in offers if o.get("destination"))
 
     return {
         "calls": {
-            "total_calls":       total_calls_kpi,
-            "total_booked":      total_booked_kpi,
+            "total_calls":       total_calls,
+            "total_booked":      booked_count,
             "booking_rate":      booking_rate,
             "total_carriers":    len(carriers),
             "avg_final_rate":    avg_final_rate,
@@ -441,6 +392,7 @@ def get_metrics():
             "avg_rounds":        avg_rounds,
             "by_outcome":        dict(outcomes),
             "by_sentiment":      dict(sentiments),
+            "by_attitude":       dict(attitudes),
             "by_equipment":      dict(equip_calls),
             "top_origins":       dict(origin_calls.most_common(6)),
             "top_destinations":  dict(dest_calls.most_common(6)),
