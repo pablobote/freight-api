@@ -369,6 +369,27 @@ def get_metrics():
     analyses  = get_docs("analyses")
     carriers  = get_docs("carriers")
 
+    # Build a per-call analysis view to avoid double-counting when the same
+    # call is posted multiple times. Latest timestamp wins per (mc, load_id).
+    analyses_by_call = {}
+    for a in analyses:
+        mc = (a.get("mc_number") or "").strip().lower()
+        load_id = (a.get("load_id") or "").strip().lower()
+        fallback = (a.get("id") or "").strip().lower() or make_id(now())
+        call_key = f"{mc}::{load_id}" if (mc or load_id) else fallback
+
+        prev = analyses_by_call.get(call_key)
+        if not prev:
+            analyses_by_call[call_key] = a
+            continue
+
+        prev_ts = prev.get("timestamp") or ""
+        curr_ts = a.get("timestamp") or ""
+        if curr_ts >= prev_ts:
+            analyses_by_call[call_key] = a
+
+    effective_analyses = list(analyses_by_call.values())
+
     # ── Offer metrics ─────────────────────────────────────────────────────────
     booked        = [o for o in offers if o.get("final_rate")]
     with_both     = [o for o in offers if o.get("final_rate") and o.get("rate_offered")]
@@ -383,16 +404,22 @@ def get_metrics():
     pct_saved        = round(avg_savings / avg_asked_rate * 100, 1)          if avg_asked_rate else 0
 
     # ── Analysis metrics ──────────────────────────────────────────────────────
-    outcomes         = Counter(a.get("outcome_classification")   for a in analyses if a.get("outcome_classification"))
-    sentiments       = Counter(a.get("sentiment_classification") for a in analyses if a.get("sentiment_classification"))
+    outcomes         = Counter(a.get("outcome_classification")   for a in effective_analyses if a.get("outcome_classification"))
+    sentiments       = Counter(a.get("sentiment_classification") for a in effective_analyses if a.get("sentiment_classification"))
 
-    durations        = [a["call_duration_seconds"] for a in analyses if a.get("call_duration_seconds")]
+    durations        = [a["call_duration_seconds"] for a in effective_analyses if a.get("call_duration_seconds")]
     avg_duration     = round(sum(durations) / len(durations))                if durations     else 0
 
-    rounds_list      = [a["negotiation_rounds"] for a in analyses if a.get("negotiation_rounds")]
+    rounds_list      = [a["negotiation_rounds"] for a in effective_analyses if a.get("negotiation_rounds")]
     avg_rounds       = round(sum(rounds_list) / len(rounds_list), 1)         if rounds_list   else 0
 
-    booking_rate     = round(len(booked) / len(offers) * 100, 1)             if offers        else 0
+    # Keep booking KPIs consistent with outcome bars when outcome data exists.
+    calls_with_outcome = sum(outcomes.values())
+    booked_from_outcome = sum(v for k, v in outcomes.items() if "book" in str(k).strip().lower())
+
+    total_calls_kpi = calls_with_outcome if calls_with_outcome else len(offers)
+    total_booked_kpi = booked_from_outcome if calls_with_outcome else len(booked)
+    booking_rate = round(total_booked_kpi / total_calls_kpi * 100, 1) if total_calls_kpi else 0
 
     # ── Equipment + route breakdown (from offers, real call data) ─────────────
     equip_calls      = Counter(o.get("equipment_type") for o in offers if o.get("equipment_type"))
@@ -401,8 +428,8 @@ def get_metrics():
 
     return {
         "calls": {
-            "total_calls":       len(offers),
-            "total_booked":      len(booked),
+            "total_calls":       total_calls_kpi,
+            "total_booked":      total_booked_kpi,
             "booking_rate":      booking_rate,
             "total_carriers":    len(carriers),
             "avg_final_rate":    avg_final_rate,
