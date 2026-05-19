@@ -90,16 +90,25 @@ def make_carrier_key(caller_name: str, mc: str) -> str:
         return caller_name.strip().lower()
     return f"mc_{mc.strip()}" if mc and mc.strip() else "unknown"
 
-def find_carrier_by_mc(mc: str) -> Optional[dict]:
+def find_carrier(caller_name: str, mc: str) -> Optional[dict]:
     """
-    Find the most recently active carrier with this MC number.
-    Used to link offer/analysis back to the FMCSA-created record.
+    Find a carrier by personal caller name + MC number.
+    If caller_name is provided, match exactly on both — this is precise and
+    handles multiple callers sharing the same MC correctly.
+    Falls back to most-recently-seen carrier with that MC if no name given.
     """
-    candidates = [c for c in get_docs("carriers") if c.get("mc_number") == mc]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: c.get("last_seen") or "", reverse=True)
-    return candidates[0]
+    carriers = get_docs("carriers")
+    if caller_name and caller_name.strip():
+        name_key = caller_name.strip().lower()
+        for c in carriers:
+            if c.get("mc_number") == mc and (c.get("carrier_name") or "").strip().lower() == name_key:
+                return c
+    # Fallback: most recently seen with same MC
+    candidates = [c for c in carriers if c.get("mc_number") == mc]
+    if candidates:
+        candidates.sort(key=lambda c: c.get("last_seen") or "", reverse=True)
+        return candidates[0]
+    return None
 
 def upsert_carrier(caller_name: str, mc: str, patch: dict) -> str:
     key = make_carrier_key(caller_name, mc)
@@ -126,7 +135,8 @@ def upsert_carrier(caller_name: str, mc: str, patch: dict) -> str:
 
 # ── Models ────────────────────────────────────────────────────────────────────
 class OfferWebhook(BaseModel):
-    carrier_name:   Optional[str]   = None
+    caller_name:    Optional[str]   = None  # personal name of the caller
+    carrier_name:   Optional[str]   = None  # company name
     legal_name:     Optional[str]   = None
     commodity_type: Optional[str]   = None
     destination:    Optional[str]   = None
@@ -147,13 +157,13 @@ class OfferWebhook(BaseModel):
 class AnalysisWebhook(BaseModel):
     mc_number:                Optional[str] = None
     load_id:                  Optional[str] = None
+    caller_name:              Optional[str] = None  # personal name of the caller
     sentiment_classification: Optional[str] = None
     sentiment_reasoning:      Optional[str] = None
     outcome_classification:   Optional[str] = None
     outcome_reasoning:        Optional[str] = None
     call_duration_seconds:    Optional[str] = None
     nego_rounds:              Optional[str] = None
-    carrier_attitude:         Optional[str] = None
 
     @property
     def negotiation_rounds(self) -> Optional[int]:
@@ -232,14 +242,11 @@ def webhook_offer(payload: OfferWebhook):
     store_doc("offers", entry["id"], entry)
 
     if payload.mc_number:
-        # FMCSA always fires first and creates the carrier record with the caller's name.
-        # Find that existing record by MC number rather than creating a new one.
-        existing = find_carrier_by_mc(payload.mc_number)
+        existing = find_carrier(payload.caller_name or "", payload.mc_number)
         if existing:
             key = existing["carrier_key"]
         else:
-            # No FMCSA record yet — create one using whatever name we have
-            key = upsert_carrier(payload.carrier_name or "", payload.mc_number, {})
+            key = upsert_carrier(payload.caller_name or "", payload.mc_number, {})
 
         carrier = get_doc("carriers", key)
         carrier["call_history"].append({
@@ -262,7 +269,7 @@ def webhook_analysis(payload: AnalysisWebhook):
     store_doc("analyses", entry["id"], entry)
 
     if payload.mc_number:
-        existing = find_carrier_by_mc(payload.mc_number)
+        existing = find_carrier(payload.caller_name or "", payload.mc_number)
         if existing:
             key = existing["carrier_key"]
             carrier = get_doc("carriers", key)
@@ -274,7 +281,6 @@ def webhook_analysis(payload: AnalysisWebhook):
                     "outcome_classification":   payload.outcome_classification,
                     "outcome_reasoning":        payload.outcome_reasoning,
                     "call_duration_seconds":    payload.duration_seconds,
-                    "carrier_attitude":         payload.carrier_attitude,
                     "negotiation_rounds":       payload.negotiation_rounds,
                     "timestamp":               entry["timestamp"],
                 })
@@ -362,7 +368,6 @@ def get_metrics():
 
     outcomes   = Counter(a.get("outcome_classification")   for a in analyses if a.get("outcome_classification"))
     sentiments = Counter(a.get("sentiment_classification") for a in analyses if a.get("sentiment_classification"))
-    attitudes  = Counter(a.get("carrier_attitude")         for a in analyses if a.get("carrier_attitude"))
     durations  = [a["call_duration_seconds"] for a in analyses if a.get("call_duration_seconds")]
     rounds_l   = [a["negotiation_rounds"]    for a in analyses if a.get("negotiation_rounds")]
 
@@ -392,7 +397,6 @@ def get_metrics():
             "avg_rounds":        avg_rounds,
             "by_outcome":        dict(outcomes),
             "by_sentiment":      dict(sentiments),
-            "by_attitude":       dict(attitudes),
             "by_equipment":      dict(equip_calls),
             "top_origins":       dict(origin_calls.most_common(6)),
             "top_destinations":  dict(dest_calls.most_common(6)),

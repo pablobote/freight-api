@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Freight Ops — HappyRobot</title>
+<link rel="icon" type="image/png" href="/static/happyrobot_logo.png">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -192,7 +193,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       </div>
     </div>
 
-    <!-- Row 4: attitude + equipment -->
     <!-- Row 4: equipment -->
     <div class="card">
       <div class="card-title">Equipment types called about</div>
@@ -400,10 +400,11 @@ function decision_badge(d) {
 function renderNegotiations() {
   const el = document.getElementById('negotiationsBody');
   if (!allOffers.length) {
-    el.innerHTML = '<div class="empty-state">No negotiations received yet.</div>';
+    el.innerHTML = '<div class="empty-state">No negotiations received yet.<br>HappyRobot will POST to <code>/webhooks/offer</code> when calls conclude.</div>';
     return;
   }
-  el.innerHTML = [...allOffers].reverse().map(o => {
+  const sorted = [...allOffers].sort((a,b) => (b.timestamp||'').localeCompare(a.timestamp||''));
+  el.innerHTML = sorted.map(o => {
     const analysis = allAnalyses.filter(a => a.mc_number===o.mc_number && a.load_id===o.load_id).pop();
     const rounds   = allNegoEvents.filter(e => e.mc_number===o.mc_number && e.load_id===o.load_id)
                                   .sort((a,b) => (a.round||0) - (b.round||0));
@@ -450,7 +451,7 @@ function renderNegotiations() {
           </div>
         </div>
         <div style="text-align:right;flex-shrink:0;padding-left:12px">
-          <div style="font-size:10px;color:var(--muted)">${fmtDate(o.timestamp)}</div>
+          <div style="font-size:10px;color:var(--muted)">${fmtTime(o.timestamp)}</div>
           ${saved !== null ? `<div style="font-size:11px;color:var(--green);margin-top:3px;font-weight:600">−$${Math.abs(saved).toFixed(0)} saved</div>` : ''}
         </div>
       </div>
@@ -491,8 +492,12 @@ function selectCarrier(carrierKey) {
   renderCarrierList();
   const c = allCarriers.find(x=>x.carrier_key===carrierKey);
   if (!c) return;
-  const statusBadge = c.status==='A'?'<span class="badge badge-green">Active</span>':'<span class="badge badge-gray">'+(c.status||'Unknown')+'</span>';
-  const authBadge = c.common_authority==='A'?'<span class="badge badge-green">Authorized</span>':'<span class="badge badge-amber">'+(c.common_authority||'–')+'</span>';
+  const statusBadge = c.status==='A'
+    ? '<span class="badge badge-green">Active</span>'
+    : `<span class="badge badge-amber">Inactive</span>`;
+  const authBadge = c.allowed_to_operate==='Y'
+    ? '<span class="badge badge-green">Authorized</span>'
+    : `<span class="badge badge-red">Not authorized</span>`;
 
   // Group call history by load_id — merge offer + analysis into one entry per call
   const raw = [...(c.call_history||[])];
