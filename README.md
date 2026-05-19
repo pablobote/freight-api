@@ -77,7 +77,7 @@ gcloud run deploy freight-api \
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /webhooks/offer` | Negotiation outcome — rates, route, carrier info |
+| `POST /webhooks/offer` | Negotiation outcome: rates, route, carrier info |
 | `POST /webhooks/analysis` | Sentiment, outcome, call duration, attitude |
 | `POST /webhooks/negotiation` | Real-time AI decision per negotiation round |
 | `POST /carriers/{mc}/fmcsa` | FMCSA verification data |
@@ -86,6 +86,6 @@ gcloud run deploy freight-api \
 
 ## Note on running the deployment
 
-The live dashboard is publicly accessible via the URL and API key above — no credentials required.
+The live dashboard is publicly accessible via the URL and API key above.
 
 Reproducing the full deployment from scratch requires a Google Cloud project with Cloud Run and Firestore enabled. The container image is hosted on a private GCR registry tied to the project. If you'd like to reproduce the environment independently, reach out and I'll provide access or walk you through it.
